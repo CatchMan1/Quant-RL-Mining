@@ -97,12 +97,12 @@ non-zero probability mass to a *diversity* of good expressions.
 
 - **State**: a fixed-length integer sequence of length `MAX_EXPR_LENGTH = 30`,
   starting with `BEG_TOKEN` and padded with `-1`.
-- **Action vocabulary** (75 actions in total):
+- **Action vocabulary** (74 actions in total):
 
   | Block | Count | Examples |
   |-------|------:|----------|
   | `BEG_TOKEN` | 1 | start-of-sequence marker |
-  | Operators | 36 | `Abs, Inv, Sign, Log, SLog1p`, `Add, Sub, Mul, Div, Pow, Greater, Less`, `Ref, TsMean, TsStd, TsSkew, TsKurt, TsEMA …`, `TsCov, TsCorr` |
+  | Operators | 35 | `Abs, Inv, Sign, Log, SLog1p`, `Add, Sub, Mul, Div, Pow, Greater, Less`, `Ref, TsMean, TsStd, TsSkew, TsKurt, TsEMA …`, `TsCov, TsCorr` |
   | Features | 32 | `$open, $close, $high, $low, $volume, $vwap, $amount, $twap, $top_amount, $amplitude_*, $successive_*, $max_ret, …` |
   | Delta times | 5 | `4, 8, 16, 32, 64` (15-min bars → 1h, 2h, 4h, 8h, 16h) |
   | `SEP_TOKEN` | 1 | end-of-sequence / exit action |
@@ -112,7 +112,12 @@ non-zero probability mass to a *diversity* of good expressions.
 - **Validity masks**: at every state `GFNEnvCore.update_masks` calls
   `ExpressionBuilder.validate` for each candidate token, enforcing RPN arity and
   type constraints (e.g., a rolling operator requires a delta-time argument plus
-  a featured operand; `SEP` is only allowed on a complete, single-tree stack).
+  a featured operand). `SEP` is allowed on a complete, single-tree stack;
+  at the length limit it is the only allowed action, even for incomplete
+  expressions (which receive the minimum reward). The 30 slots include `BEG`,
+  so sampling takes at most 29 appended tokens plus one exit step.
+  Each non-initial, non-sink state has exactly one backward action: remove its
+  last token. Initial and sink states have no backward actions.
   Illegal actions receive probability 0.
 
 ### Structure-Aware Encoder
@@ -321,6 +326,9 @@ python train_gfn.py \
 - `--n_trajectories` — batch size of trajectories sampled per episode.
 - `--ssl_weight` / `--nov_weight` — initial weights of the SSL / novelty rewards.
 - `--weight_decay_type` + `--final_weight_ratio` — decay schedule of those weights.
+  Linear and quadratic polynomial schedules support a final ratio of zero.
+  Exponential decay requires `0 < final_weight_ratio <= 1` (for example `0.01`).
+  All schedules stop decaying at the configured final ratio.
 
 ### 2. Resume / incremental training
 
@@ -423,3 +431,14 @@ This project builds on and adapts several open-source works:
   layers used by the structure-aware encoder.
 
 The work is intended for research and educational purposes.
+
+### Regression checks
+
+```bash
+PYTHONPATH=src python -m pytest -q
+```
+
+The tests cover expression graph token IDs, parent masks, the length limit,
+GNN sampling and gradients, entropy with/without stored logits, checkpoint
+`logZ` persistence, and reward weight schedules. They use a fixed reward fixture
+and do not require market data or run a full training experiment.

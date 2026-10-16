@@ -38,52 +38,21 @@ class EntropyTBGFlowNet(TBGFlowNet):
             trajectories, recalculate_all_logprobs
         )
 
-        # Calculate entropy term
-
-        entropy_term = torch.zeros(trajectories.n_trajectories, device=trajectories.states.device)
-        if trajectories.estimator_outputs is not None:  
-            logits = trajectories.estimator_outputs  #从策略网络输出logits计算概率 (max_len, batch_size, n_actions) 输出的是每个动作的概率
-            temp_logits = logits / self.entropy_temperature
-            probs = torch.softmax(temp_logits, dim=-1) # (max_len, batch_size, n_actions)
-            # 计算熵：H(p) = -Σ p(x) * log(p(x))
-            entropy_per_step = -torch.sum(
-                probs * torch.log(probs.clamp(min=1e-9)), dim=-1
-            )  # (max_len, batch_size)
-
-            # Mask out invalid steps for each trajectory
-            # 不同轨迹的长度不同，需要对每个轨迹的熵进行求和
-            # 对没有到达max_len的步骤mask为False,熵为0
-            max_len = logits.shape[0]
-            step_indices = torch.arange(max_len, device=logits.device).unsqueeze(1)
-            valid_steps_mask = step_indices < trajectories.when_is_done.unsqueeze(0)
-
-            masked_entropy = entropy_per_step * valid_steps_mask
-
-            # Sum entropy over trajectory steps for each trajectory in the batch
-            entropy_sum_per_trajectory = masked_entropy.sum(dim=0)  # (batch_size,)
-
-            entropy_term = entropy_sum_per_trajectory * self.entropy_coef
-
-        # 如果没有imator_outputs，使用旧的计算熵的方法
-        elif self.entropy_coef > 0:
-            # Fallback for older gfn versions or if outputs are not saved
-            non_terminal_mask = ~trajectories.is_done # 找到还在进行中的轨迹
-            if torch.any(non_terminal_mask):
-                # This part is not batched correctly for n_trajectories > 1
-                # but kept for compatibility with the old logic.
-                non_terminal_states = trajectories.states[non_terminal_mask]
-                # 手动预处理+策略网络前向传播
-                preprocessed_states = self.pf.preprocessor(non_terminal_states)
-                logits = self.pf.module(preprocessed_states)# logits: (n_non_terminal, n_actions)
-                # 计算熵
-                temp_logits = logits / self.entropy_temperature
-
-                probs = torch.softmax(temp_logits, dim=-1)
-                entropy = -torch.sum(
-                    probs * torch.log(probs.clamp(min=1e-9)), dim=-1
-                )
-
-                entropy_term = entropy.sum() * self.entropy_coef
+        # 只在真实动作步上计算，避免补齐位置的全 -inf logits 产生 NaN。
+        step_count = trajectories.actions.tensor.shape[0]
+        steps = torch.arange(step_count, device=trajectories.states.device).unsqueeze(1)
+        valid_steps = steps < trajectories.when_is_done.unsqueeze(0)
+        action_states = trajectories.states[:-1][valid_steps]
+        if trajectories.estimator_outputs is not None and not recalculate_all_logprobs:
+            logits = trajectories.estimator_outputs[valid_steps]
+        else:
+            logits = self.pf(action_states)
+        logits = logits.masked_fill(~action_states.forward_masks, -torch.inf)
+        probs = torch.softmax(logits / self.entropy_temperature, dim=-1)
+        entropy = -(probs * probs.clamp(min=1e-9).log()).sum(dim=-1)
+        entropy_per_step = torch.zeros(valid_steps.shape, device=logits.device, dtype=logits.dtype)
+        entropy_per_step[valid_steps] = entropy
+        entropy_term = entropy_per_step.sum(dim=0) * self.entropy_coef
         #scores = log_pf - log_pb - log_reward；reward是该轨迹下的总奖励
         return log_pf, log_pb, scores, entropy_term
     

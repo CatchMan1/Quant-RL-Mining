@@ -7,7 +7,7 @@
 # ------------------------------------------------------------
 # Raw K-line data, exported factor values, training logs and
 # checkpoints all live under data/ and must stay local.
-data/
+/data/
 *.csv
 *.pt
 *.pth
@@ -44,8 +44,8 @@ htmlcov/
 # ------------------------------------------------------------
 .venv/
 venv/
-ENV/
-env/
+/ENV/
+/env/
 
 # ------------------------------------------------------------
 # IDE / editor / OS

@@ -20,7 +20,8 @@ def _build_graph_from_rpn(token_ids: list[int], token_embedding_layer: nn.Embedd
         if tid == beg_token_id:
             tokens.append(BEG_TOKEN)
         else:
-            tokens.append(action2token(tid))
+            # GFN IDs include BEG; the RL wrapper expects IDs without BEG.
+            tokens.append(action2token(tid - 1))
     
     edges = []
     edge_types = []

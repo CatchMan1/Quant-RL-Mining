@@ -11,7 +11,6 @@ import numpy as np
 import argparse
 import json
 from torch.optim import Adam
-from torch.optim.lr_scheduler import LinearLR, ExponentialLR, PolynomialLR
 from torch.distributions import Categorical
 from torch import nn
 from tqdm import tqdm
@@ -121,61 +120,33 @@ class GFNLogger:
 
 
 class WeightScheduler:
-    """A scheduler for managing weight decay using PyTorch schedulers"""
-    
+    """按训练步数直接计算奖励权重，达到终值后保持不变。"""
+
     def __init__(self, initial_ssl_weight, initial_nov_weight, final_ratio, total_steps, scheduler_type='linear'):
+        if total_steps <= 0 or not 0 <= final_ratio <= 1:
+            raise ValueError("total_steps must be positive and final_ratio must be in [0, 1]")
+        if scheduler_type not in ('linear', 'polynomial', 'exponential'):
+            raise ValueError(f"Unknown scheduler type: {scheduler_type}")
+        if scheduler_type == 'exponential' and final_ratio == 0:
+            raise ValueError("Exponential decay requires final_weight_ratio > 0; use linear or polynomial to reach zero")
         self.initial_ssl_weight = initial_ssl_weight
         self.initial_nov_weight = initial_nov_weight
-        self.final_ssl_weight = initial_ssl_weight * final_ratio
-        self.final_nov_weight = initial_nov_weight * final_ratio
+        self.final_ratio = final_ratio
         self.total_steps = total_steps
         self.scheduler_type = scheduler_type
-        
-        # Create dummy parameters and optimizers for using PyTorch schedulers
-        self.ssl_param = nn.Parameter(torch.tensor(initial_ssl_weight))
-        self.nov_param = nn.Parameter(torch.tensor(initial_nov_weight))
-        
-        # Create dummy optimizers (we won't actually use them for optimization)
-        self.ssl_optimizer = Adam([self.ssl_param], lr=1.0)
-        self.nov_optimizer = Adam([self.nov_param], lr=1.0)
-        
-        # Create schedulers based on type
-        if scheduler_type == 'linear':
-            # LinearLR decays from start_factor to end_factor
-            start_factor = 1.0
-            end_factor = final_ratio
-            self.ssl_scheduler = LinearLR(self.ssl_optimizer, start_factor=start_factor, 
-                                        end_factor=end_factor, total_iters=total_steps)
-            self.nov_scheduler = LinearLR(self.nov_optimizer, start_factor=start_factor, 
-                                        end_factor=end_factor, total_iters=total_steps)
-        elif scheduler_type == 'exponential':
-            # ExponentialLR multiplies by gamma each step
-            gamma = (final_ratio) ** (1.0 / total_steps)
-            self.ssl_scheduler = ExponentialLR(self.ssl_optimizer, gamma=gamma)
-            self.nov_scheduler = ExponentialLR(self.nov_optimizer, gamma=gamma)
-        elif scheduler_type == 'polynomial':
-            # PolynomialLR with power=1 is linear, power=2 is quadratic, etc.
-            self.ssl_scheduler = PolynomialLR(self.ssl_optimizer, total_iters=total_steps, 
-                                           power=2.0, end_factor=final_ratio)
-            self.nov_scheduler = PolynomialLR(self.nov_optimizer, total_iters=total_steps, 
-                                           power=2.0, end_factor=final_ratio)
-        else:
-            raise ValueError(f"Unknown scheduler type: {scheduler_type}")
-    
+        self.current_step = 0
+
     def step(self):
-        """Step both schedulers"""
-        self.ssl_scheduler.step()
-        self.nov_scheduler.step()
-    
+        self.current_step = min(self.current_step + 1, self.total_steps)
+
     def get_current_weights(self):
-        """Get current weight values"""
-        ssl_lr = self.ssl_scheduler.get_last_lr()[0]
-        nov_lr = self.nov_scheduler.get_last_lr()[0]
-        
-        current_ssl_weight = self.initial_ssl_weight * ssl_lr
-        current_nov_weight = self.initial_nov_weight * nov_lr
-        
-        return current_ssl_weight, current_nov_weight
+        progress = self.current_step / self.total_steps
+        if self.scheduler_type == 'exponential':
+            ratio = self.final_ratio ** progress
+        else:
+            power = 2 if self.scheduler_type == 'polynomial' else 1
+            ratio = self.final_ratio + (1 - self.final_ratio) * (1 - progress) ** power
+        return self.initial_ssl_weight * ratio, self.initial_nov_weight * ratio
 
 # ===== Resume helpers =====
 # 这些超参与 checkpoint 强相关（模型结构或训练信号），
@@ -385,7 +356,7 @@ def train(args):
     logger = GFNLogger(pf, pool, log_dir, data_test, target, data_val, pb_head=pb_head,
                        logZ=loss_fn.logZ, args=args)
 
-    print(f"Weight decay strategy: {args.weight_decay_type} (using PyTorch schedulers)")
+    print(f"Weight decay strategy: {args.weight_decay_type}")
     print(f"SSL weight: {args.ssl_weight:.4f} -> {args.ssl_weight * args.final_weight_ratio:.4f}")
     print(f"Novelty weight: {args.nov_weight:.4f} -> {args.nov_weight * args.final_weight_ratio:.4f}")
     print(f"Training episodes: {n_episodes} (starting from {start_episode})")
@@ -459,7 +430,7 @@ if __name__ == '__main__':
     parser.add_argument('--ssl_weight', type=float, default=0.5, help='Initial weight for SSL reward (will decay during training)')
     parser.add_argument('--nov_weight', type=float, default=0.5, help='Initial weight for novelty reward (will decay during training)')
     parser.add_argument('--weight_decay_type', type=str, default='linear', choices=['linear', 'exponential', 'polynomial'], help='Type of weight decay to apply')
-    parser.add_argument('--final_weight_ratio', type=float, default=0.0, help='Final weight as ratio of initial weight (e.g., 0.1 means decay to 10% of initial)')
+    parser.add_argument('--final_weight_ratio', type=float, default=0.0, help='Final weight ratio in [0, 1]; exponential requires > 0 (e.g., 0.1)')
     # 用于增量训练，指定恢复训练的检查点目录路径
     parser.add_argument('--resume', type=str, default=None, help='Path to checkpoint directory to resume training from (e.g. data/gfn_logs/pool_10/xxx/)')
     args = parser.parse_args()
